@@ -21,10 +21,12 @@ function normalizePath(value) {
 function isAllowedWritePath(value) {
   const normalized = normalizePath(value)
   if (ALLOWED_WRITE_PATH.test(normalized)) return true
-  const temp = normalizePath(os.tmpdir()).replace(/\/+$/, '').toLowerCase()
+  const temp = normalizePath(os.tmpdir()).replace(/\/+$/, '')
   // A root-only tmpdir is ignored so a degraded value cannot exempt every write.
   if (temp.split('/').filter(Boolean).length <= 1) return false
-  return isInsideRoot(value, temp, temp)
+  const windows = /^[a-z]:[\\/]/i.test(normalized) || /^[a-z]:[\\/]/i.test(temp)
+  const tempForComparison = windows ? temp.toLowerCase() : temp
+  return isInsideRoot(value, tempForComparison, tempForComparison)
 }
 
 function isInsideRoot(raw, rootPath, workspacePath) {
@@ -304,7 +306,7 @@ export function compileDangerPatterns(config) {
 export function compileTrustedWriteRoots(config, env = process.env) {
   const roots = (config.trustedWriteRoots ?? []).map((source) => {
     const trimmed = String(source).trim()
-    if (trimmed.length === 0 || !path.isAbsolute(trimmed)) {
+    if (trimmed.length === 0 || (!path.isAbsolute(trimmed) && !path.win32.isAbsolute(trimmed))) {
       throw new Error(`dsh-auto-approve: invalid trusted write root ${JSON.stringify(source)}: expected an absolute path such as /Users/you/code or D:\\work\\code`)
     }
     return path.resolve(trimmed)
