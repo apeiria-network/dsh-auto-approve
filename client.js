@@ -6,16 +6,24 @@ window.__ModuleLoader__.load({
 
     const ICON_ATTRIBUTE = 'data-dsh-auto-approve-icon'
     const STYLE_ATTRIBUTE = 'data-dsh-auto-approve-style'
+    // Must match the `name` of this plugin's preset in cordis.patch.yml.
+    const PRESET_LABEL = 'Sandboxed Auto'
     const TRIGGER_LABELS = new Set([
-      '访问模式，当前：Auto',
-      'Access mode, current: Auto',
+      `访问模式，当前：${PRESET_LABEL}`,
+      `Access mode, current: ${PRESET_LABEL}`,
     ])
-    const PERMISSION_LABELS = new Set([
+    // Built-in preset labels are localized from dsh 0.1.2 on, so the menu is
+    // recognized by the Auto entry plus at least two other known built-ins
+    // rather than by one exact set of English labels.
+    const BUILT_IN_LABELS = new Set([
       'Read Only',
       'Workspace Write',
-      'Auto',
       'Full access',
+      '仅可查看',
+      '工作区内修改',
+      '完全权限',
     ])
+    const MIN_BUILT_IN_LABELS = 2
     const TRIGGER_PREFIXES = [
       '访问模式，当前：',
       'Access mode, current: ',
@@ -41,7 +49,9 @@ window.__ModuleLoader__.load({
   height: 14px;
 }
 [${ICON_ATTRIBUTE}="menu"]::before {
-  color: var(--dsw-alias-label-tertiary);
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-menu-icon, var(--dsw-alias-label-tertiary));
 }
 @container (max-width: 460px) {
   [${ICON_ATTRIBUTE}="trigger"] > span:first-of-type {
@@ -118,6 +128,16 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
+    function directMenus(parent) {
+      const menus = []
+      try {
+        for (const child of parent?.children ?? []) {
+          if (child.getAttribute?.('role') === 'menu') menus.push(child)
+        }
+      } catch {}
+      return menus
+    }
+
     function permissionAutoItem(menu) {
       try {
         const items = Array.from(menu.querySelectorAll('button[role="menuitem"]'))
@@ -127,10 +147,13 @@ window.__ModuleLoader__.load({
           if (typeof label !== 'string' || label.length === 0 || byLabel.has(label)) continue
           byLabel.set(label, item)
         }
-        for (const label of PERMISSION_LABELS) {
-          if (!byLabel.has(label)) return undefined
+        const autoItem = byLabel.get(PRESET_LABEL)
+        if (autoItem === undefined) return undefined
+        let builtIns = 0
+        for (const label of byLabel.keys()) {
+          if (BUILT_IN_LABELS.has(label)) builtIns += 1
         }
-        return byLabel.get('Auto')
+        return builtIns >= MIN_BUILT_IN_LABELS ? autoItem : undefined
       } catch {
         return undefined
       }
@@ -181,13 +204,24 @@ window.__ModuleLoader__.load({
       }
       const scan = () => {
         const active = new Map()
+        const menus = new Set()
+        let sawTrigger = false
         const triggers = Array.from(document.querySelectorAll(TRIGGER_SELECTOR))
         for (const trigger of triggers) {
           const label = trigger.getAttribute?.('aria-label')
           if (!permissionTriggerLabel(label)) continue
+          sawTrigger = true
           if (TRIGGER_LABELS.has(label)) active.set(trigger, 'trigger')
           const menu = directMenu(trigger.parentElement)
-          if (menu === undefined) continue
+          if (menu !== undefined) menus.add(menu)
+        }
+        // From dsh 0.2.0 the picker portals its menu to <body>, so it is no
+        // longer the trigger's sibling. Body-level menus are considered only
+        // while a permission trigger is on the page.
+        if (sawTrigger) {
+          for (const menu of directMenus(document.body)) menus.add(menu)
+        }
+        for (const menu of menus) {
           const autoItem = permissionAutoItem(menu)
           if (autoItem !== undefined) active.set(autoItem, 'menu')
         }
