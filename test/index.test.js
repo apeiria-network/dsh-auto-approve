@@ -33,25 +33,28 @@ function requestOf({
   callId = 'call-1',
   sessionId = 'session-1',
   signal,
+  toolName = 'bash',
+  toolArguments,
+  cwd = '/workspace/project',
 } = {}) {
   return {
     agent: {
       session: {
         id: sessionId,
-        header: { cwd: '/workspace/project' },
+        header: { cwd },
         events: events ?? [{
           type: 'tool/call',
           data: {
             turn: 1,
             step: 1,
             callId,
-            name: 'bash',
-            arguments: JSON.stringify({ command }),
+            name: toolName,
+            arguments: toolArguments ?? JSON.stringify(toolName === 'bash' ? { command } : { file_path: command }),
           },
         }],
       },
     },
-    toolName: 'bash',
+    toolName,
     callId,
     reason,
     ...signal === undefined ? {} : { signal },
@@ -462,13 +465,16 @@ test('harness configuration directories stay trusted by default and can be untru
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = path.join(os.homedir(), '.dsh')
   try {
+    let sessionCounter = 0
     for (const filePath of ['~/.dsh/profiles/default.yml', '~/.dsh/.agent-presets/auto.yml']) {
-      const request = requestOf({ toolName: 'write', command: filePath })
-      const app = harness()
+      const sessionId = `session-dsh-home-${sessionCounter++}`
+      const request = requestOf({ toolName: 'write', command: filePath, sessionId })
+      const app = harness({ config: { sessionMemory: false } })
       assert.deepEqual(await app.run(request), { result: 'allowed-once', nextCalls: 0 }, filePath)
       assert.equal(app.llmCalls, 1, filePath)
-      const strict = harness({ config: { trustDshHome: false } })
-      assert.deepEqual(await strict.run(requestOf({ toolName: 'write', command: filePath })), { result: MANUAL, nextCalls: 1 }, filePath)
+      const strictSessionId = `session-dsh-home-strict-${sessionCounter++}`
+      const strict = harness({ config: { trustDshHome: false, sessionMemory: false } })
+      assert.deepEqual(await strict.run(requestOf({ toolName: 'write', command: filePath, sessionId: strictSessionId })), { result: MANUAL, nextCalls: 1 }, filePath)
       assert.equal(strict.llmCalls, 0, filePath)
       assert.match(strict.logs[0], /outside-workspace-write/, filePath)
     }
@@ -483,15 +489,15 @@ test('a custom $DSH_HOME is the trusted root instead of ~/.dsh', async () => {
   const custom = path.join(os.homedir(), 'dsh-auto-approve-custom-home')
   process.env.DSH_HOME = custom
   try {
-    const app = harness()
+    const app = harness({ config: { sessionMemory: false } })
     assert.deepEqual(
-      await app.run(requestOf({ toolName: 'write', command: path.join(custom, 'profiles', 'default.yml') })),
+      await app.run(requestOf({ toolName: 'write', command: path.join(custom, 'profiles', 'default.yml'), sessionId: 'session-custom-dsh-1' })),
       { result: 'allowed-once', nextCalls: 0 },
     )
     assert.equal(app.llmCalls, 1)
-    const tilde = harness()
+    const tilde = harness({ config: { sessionMemory: false } })
     assert.deepEqual(
-      await tilde.run(requestOf({ toolName: 'write', command: '~/.dsh/profiles/default.yml' })),
+      await tilde.run(requestOf({ toolName: 'write', command: '~/.dsh/profiles/default.yml', sessionId: 'session-custom-dsh-2' })),
       { result: MANUAL, nextCalls: 1 },
     )
     assert.equal(tilde.llmCalls, 0)
@@ -507,13 +513,14 @@ test('configured trusted write roots extend the boundary for tools and commands'
   const root = path.join(os.homedir(), 'dsh-auto-approve-trusted-root')
   const target = path.join(root, 'out.txt')
   try {
+    let sessionCounter = 0
     for (const [toolName, command] of [['write', target], ['bash', `cp ./a.txt "${target}"`]]) {
-      const app = harness({ config: { trustedWriteRoots: [root] } })
-      assert.deepEqual(await app.run(requestOf({ toolName, command })), { result: 'allowed-once', nextCalls: 0 }, command)
+      const app = harness({ config: { trustedWriteRoots: [root], sessionMemory: false } })
+      assert.deepEqual(await app.run(requestOf({ toolName, command, sessionId: `session-trusted-${sessionCounter++}` })), { result: 'allowed-once', nextCalls: 0 }, command)
       assert.equal(app.llmCalls, 1, command)
     }
-    const bare = harness()
-    assert.deepEqual(await bare.run(requestOf({ toolName: 'write', command: target })), { result: MANUAL, nextCalls: 1 })
+    const bare = harness({ config: { sessionMemory: false } })
+    assert.deepEqual(await bare.run(requestOf({ toolName: 'write', command: target, sessionId: 'session-trusted-bare' })), { result: MANUAL, nextCalls: 1 })
     assert.equal(bare.llmCalls, 0)
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
@@ -561,10 +568,11 @@ test('explicit shell writes cover common commands and preserve read-only redirec
 })
 
 test('edit and write outside workspace delegate before classification', async () => {
+  let sessionCounter = 0
   for (const toolName of ['edit', 'write']) {
     for (const filePath of ['/etc/x', '../other/file', '/workspace/project/../../etc/x', '/workspace/project2/x', '~/outside-file']) {
-      const app = harness()
-      const request = requestOf({ toolName, command: filePath })
+      const app = harness({ config: { sessionMemory: false } })
+      const request = requestOf({ toolName, command: filePath, sessionId: `session-outside-${sessionCounter++}` })
       assert.deepEqual(await app.run(request), { result: MANUAL, nextCalls: 1 }, `${toolName} ${filePath}`)
       assert.equal(app.llmCalls, 0, `${toolName} ${filePath}`)
     }
@@ -617,9 +625,10 @@ test('temporary write targets retain automatic classification', async () => {
 })
 
 test('malformed edit and write arguments fail closed', async () => {
+  let sessionCounter = 0
   for (const toolArguments of ['{', JSON.stringify({}), JSON.stringify({ file_path: 42 })]) {
-    const app = harness()
-    const request = requestOf({ toolName: 'edit', command: 'ignored', toolArguments })
+    const app = harness({ config: { sessionMemory: false } })
+    const request = requestOf({ toolName: 'edit', command: 'ignored', toolArguments, sessionId: `session-malformed-${sessionCounter++}` })
     assert.deepEqual(await app.run(request), { result: MANUAL, nextCalls: 1 })
     assert.equal(app.llmCalls, 0)
   }
@@ -797,6 +806,7 @@ test('approve is the only automatic approval exit', async () => {
     justification: 'escalate sandbox to danger-full-access: install a dependency from npm',
     targetSandboxMode: 'danger-full-access',
     workspacePath: '/workspace/project',
+    trustedWriteRoots: evidence.trustedWriteRoots,
     latestUserMessage: null,
   })
   assert.match(
